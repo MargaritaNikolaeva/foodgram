@@ -1,0 +1,98 @@
+name: Django CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+env:
+  DOCKER_IMAGE_NAME_BACKEND: foodgram-backend
+  DOCKER_IMAGE_NAME_FRONTEND: foodgram-frontend
+  DOCKER_HUB_REPO: # репозиторий с образами контейнера для бекэнда
+  FRONTEND_DOCKER_HUB_REPO: # репозиторий с образами контейнера для фронтенда
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.13'
+
+    # Установка Docker и необходимых компонентов
+    - name: Set up QEMU
+      uses: docker/setup-qemu-action@v2
+      
+    - name: Set up Buildx
+      uses: docker/setup-buildx-action@v2
+      
+    - name: Login to Docker Hub
+      uses: docker/login-action@v2
+      with:
+        username: ${{ secrets.DOCKER_HUB_USERNAME }}
+        password: ${{ secrets.DOCKER_HUB_PASSWORD }}
+
+    - name: Check Docker and Compose versions
+      run: |
+        docker --version
+        docker compose version
+
+    - name: Install Python dependencies
+      run: |
+        pip install --upgrade pip
+        pip install flake8 pylint
+
+    - name: Install backend requirements
+      run: |
+        pip install -r backend/requirements.txt
+
+    - name: PEP8 check (flake8)
+      run: |
+        flake8 backend --exclude=migrations --max-line-length=88 --ignore=E203,W503
+
+    - name: PyLint check (backend)
+      run: |
+        pylint backend/*.py backend/**/*.py || exit 0
+
+    - name: Run Django tests
+      run: |
+        cd backend
+        python manage.py test
+
+    - name: Build Docker images
+      run: |
+        docker compose build
+
+    - name: Tag Docker images for Docker Hub
+      run: |
+        docker tag $DOCKER_IMAGE_NAME_BACKEND $DOCKER_HUB_REPO
+        docker tag $DOCKER_IMAGE_NAME_FRONTEND $FRONTEND_DOCKER_HUB_REPO
+
+    - name: Push Docker images to Docker Hub
+      if: github.event_name == 'push'
+      run: |
+        docker push $DOCKER_HUB_REPO
+        docker push $FRONTEND_DOCKER_HUB_REPO
+
+    - name: Deploy to server via SSH
+      if: github.event_name == 'push'
+      uses: appleboy/ssh-action@v0.1.7
+      with:
+        host: ${{ secrets.SERVER_HOST }}
+        username: ${{ secrets.SERVER_USER }}
+        password: ${{ secrets.SERVER_PASSWORD }}
+        port: ${{ secrets.SERVER_PORT }}
+        script: |
+          cd /home/${{ secrets.SERVER_USER }}/foodgram
+          docker compose down
+          docker compose pull
+          docker compose up -d
+          docker compose exec backend python manage.py migrate
+          docker compose exec backend python manage.py collectstatic
+          docker compose exec backend cp -r /app/collected_static/. /backend_static/static/
